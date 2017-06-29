@@ -83,7 +83,7 @@ def convolution_2d(input_matrix, filter_weights, stride, padding='same'):
                         else:
                             conv_result += np.dot(weight_vect, padded_matrix[0][j+l][i:i+3][h])
                 #print(np.add(conv_result, bias_vector[k]))
-                output_matrix[0][i][j][k] = float32(np.add(conv_result, bias_vector[k]))
+                output_matrix[0][i][j][k] = np.float32(np.add(conv_result, bias_vector[k]))
 
     #print(output_matrix)
     return output_matrix
