@@ -83,7 +83,7 @@ def convolution_2d(input_matrix, filter_weights, stride, padding='same'):
                         else:
                             conv_result += np.dot(weight_vect, padded_matrix[0][j+l][i:i+3][h])
                 #print(np.add(conv_result, bias_vector[k]))
-                output_matrix[0][i][j][k] = np.float32(np.add(conv_result, bias_vector[k]))
+                output_matrix[0][i][j][k] = np.add(conv_result, bias_vector[k])
 
     #print(output_matrix)
     return output_matrix
@@ -124,7 +124,7 @@ def max_pool_2d(input_matrix, kernel_size, stride, padding='valid'):
 
 def relu(input_matrix):
     """
-    Relu layer. f(x) = max(x, 0)
+    Relu activation function. f(x) = max(x, 0)
 
     TODO: 
     Do I want to implement this directly into the convolution_2d method? (same number of comparisions)
@@ -138,6 +138,18 @@ def relu(input_matrix):
 
     return input_matrix
 
+def sigmoid(input_matrix):
+    """
+    Sigmoid activation function
+    S(x) = 1 / 1 + e^-x
+    """
+    for i in range(0, len(input_matrix[0])):
+        for j in range(0, len(input_matrix[0][0])):
+            for k in range(0, len(input_matrix[0][0][0])):
+                input_matrix[0][i][j][k] = np.float32(1 / (1 + (np.exp(-input_matrix[0][i][j][k]))))
+
+    return input_matrix
+
 def upsampling_2d(input_matrix, kernel_size):
     """
     Increase width and height of input matrix.
@@ -146,24 +158,20 @@ def upsampling_2d(input_matrix, kernel_size):
          - figure out how to get output dimensions
     """
     input_matrix_depth = len(input_matrix[0][0][0])
-
-    #create weights for convolution (all 1s)
-    convolution_weights = np.ndarray(shape=(int(input_matrix_depth), int(kernel_size),
-                                            int(kernel_size)), dtype=np.float32)
-    convolution_bias = np.ndarray(shape=(int(input_matrix_depth)), dtype = np.float32)
-    convolution_weights.fill(np.float32(1))
-    convolution_bias.fill(np.float32(1))
-
-    convolution_filters = []
-    convolution_filters.append(convolution_weights)
-    convolution_filters.append(convolution_bias)
-
     input_matrix_width_height = len(input_matrix[0])
-    num_zeros = int(input_matrix_width_height)
+    output_matrix_width_height = int(2 * input_matrix_width_height)
 
-    padded_matrix =  zero_pad_matrix(input_matrix, num_zeros)
-    padded_matrix = np.pad(padded_matrix, ((0, 0), (0, 1), (0, 1), (0, 0)), 'constant')
-    return convolution_2d(padded_matrix, convolution_filters, 1, padding='valid')
+    output_matrix = np.ndarray(shape=(1, output_matrix_width_height, output_matrix_width_height, 
+                                      input_matrix_depth), dtype=np.float32)
+
+    for i in range(0, input_matrix_width_height):
+        for j in range(0, input_matrix_width_height):
+            for k in range(0, input_matrix_depth):
+                output_matrix[0][i*2][j*2][k] = input_matrix[0][i][j][k]
+                output_matrix[0][(i*2)+1][j*2][k] = input_matrix[0][i][j][k]
+                output_matrix[0][i*2][(j*2)+1][k] = input_matrix[0][i][j][k]
+                output_matrix[0][(i*2)+1][(j+2)+1][k] = input_matrix[0][i][j][k]
+    return output_matrix
 
 def reshape(input_matrix, reshape_dims):
     """
