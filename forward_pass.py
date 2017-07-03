@@ -3,7 +3,9 @@ Module that contains methods for forward passes of various layers found in a CNN
 
 Modules will initially be written in standard python and then have parts pushed onto the FPGA.
 """
-from __future__ import division
+from __future__ import print_function, division
+from data_utils import get_layer_type
+from tests import predict_with_keras, keras_get_layer_output
 
 import numpy as np
 import pyopencl as cl
@@ -23,69 +25,45 @@ def convolution_2d(input_matrix, filter_weights, stride, padding='same'):
     Output:
     Matrix of values***todo***
     """
-    #take transpose to make operations simpler
-    weights_transpose = filter_weights[0].T
-    #print("weights_transpose:", weights_transpose)
+    weights_matrix = filter_weights[0]
     bias_vector = filter_weights[1]
-    #print("bias_vector:", bias_vector)
 
     #pad matrix to maintain input dimensions
-    filter_dim = len(weights_transpose[0][0])
-    #print("filter_dim", filter_dim)
+    filter_dim = len(weights_matrix)
     if padding == 'same':
         num_zeros_padding = (filter_dim - 1) / 2
-        padded_matrix = zero_pad_matrix(input_matrix, num_zeros_padding).T
+        padded_matrix = zero_pad_matrix(input_matrix, num_zeros_padding)
     else:
-        padded_matrix = input_matrix.T
-    #print("padded matrix:", padded_matrix)
-    #note: take transpose to make operations simpler
+        padded_matrix = input_matrix
 
     #going to manually do the convolution to make conversion to opencl easier
     #this part will be done on an FPGA (until the return statement)
     #there are so many nested loops here something's got to change
     padded_matrix_dim = len(padded_matrix[0][0])
-    #print("padded_matrix_dim:", padded_matrix_dim)
-    num_filters = len(weights_transpose)
-    #print("len padded_matrix:", len(padded_matrix))
-    #print("len padded_matrix[0]:", len(padded_matrix[0]))
-    #print("len padded_matrix[0][0]:", len(padded_matrix[0][0]))
-    #print("len padded_matrix[0][0][0]:", len(padded_matrix[0][0][0]))
-    #print("padded_matrix:", padded_matrix)
-    #print("padded_matrix[0]:", padded_matrix[0])
-    #print("padded_matrix[0][0]:", padded_matrix[0][0])
-    #print("padded_matrix[0][0][0]:", padded_matrix[0][0][0])
-    #this is shit has to be a better way
-    if not isinstance(padded_matrix[0][0][0], np.float64) and not isinstance(padded_matrix[0][0][0], np.float32):
-        num_input_channels = len(padded_matrix[0][0][0])
-    else:
+    num_filters = len(weights_matrix.T)
+
+    try:
+        num_input_channels = len(input_matrix[0][0][0])
+    except:
         num_input_channels = 1
-    #num_input_channels = 1 # TEMP TODO
     output_matrix_width_height = padded_matrix_dim - filter_dim + 1
     output_matrix = np.ndarray(shape=(1, output_matrix_width_height,
                                       output_matrix_width_height, num_filters), dtype=np.float32)
-    #print("len output_matrix:", len(output_matrix))
-    #print("len output_matrix[0]:", len(output_matrix[0]))
-    #print("len output_matrix[0][0]:", len(output_matrix[0][0]))
-    #print("len output_matrix[0][0][0]:", len(output_matrix[0][0][0]))
-    for j in range(0, padded_matrix_dim - filter_dim, stride): #height
-        for i in range(0, padded_matrix_dim - filter_dim, stride): #width
+
+    for j in range(0, padded_matrix_dim - filter_dim + 1, stride): #height
+        for i in range(0, padded_matrix_dim - filter_dim + 1, stride): #width
             for k in range(0, num_filters): #filters
-                weight_matrix = weights_transpose[k]
                 conv_result = 0
                 for h in range(0, num_input_channels): #depth
                     for l in range(0, filter_dim):
-                        weight_vect = weight_matrix[h][l]
-                        #if i == 0 and j == 0:
-                        #    print("weight_vect:", weight_vect)
-                        #    print("matrix it's being mult by:", padded_matrix[0][j+l][i:i+3])
                         if num_input_channels == 1:
-                            conv_result += np.dot(weight_vect, padded_matrix[0][j+l][i:i+3])
+                            for s in range(0, filter_dim):
+                                conv_result += weights_matrix[l][s][0][k]*padded_matrix[0][i+l][j+s]
                         else:
-                            conv_result += np.dot(weight_vect, padded_matrix[0][j+l][i:i+3][h])
-                #print(np.add(conv_result, bias_vector[k]))
+                            for s in range(0, filter_dim):
+                                conv_result += weights_matrix[l][s][h][k]*padded_matrix[0][i+l][j+s][h]
                 output_matrix[0][i][j][k] = np.add(conv_result, bias_vector[k])
 
-    #print(output_matrix)
     return output_matrix
 
 
@@ -110,8 +88,8 @@ def max_pool_2d(input_matrix, kernel_size, stride, padding='valid'):
                                       input_matrix_depth), dtype=np.float32)
     #print("input matrix dimensions", input_matrix.shape)
     #print("output matrix dimensions:", output_matrix.shape)
-    for i in range(0, input_matrix_width_height-kernel_size):
-        for j in range(0, input_matrix_width_height-kernel_size):
+    for i in range(0, input_matrix_width_height-kernel_size+1, stride):
+        for j in range(0, input_matrix_width_height-kernel_size+1, stride):
             for k in range(0, input_matrix_depth):
                 #ok now need to get max out of this array chunk, will have to revisit this.
                 curr_max = 0
@@ -157,20 +135,21 @@ def upsampling_2d(input_matrix, kernel_size):
     TODO - figure out how upsampling2d is supposed to work
          - figure out how to get output dimensions
     """
-    input_matrix_depth = len(input_matrix[0][0][0])
-    input_matrix_width_height = len(input_matrix[0])
-    output_matrix_width_height = int(2 * input_matrix_width_height)
+    #input_matrix_depth = len(input_matrix[0][0][0])
+    #input_matrix_width_height = len(input_matrix[0])
+    #output_matrix_width_height = int(2 * input_matrix_width_height)
 
-    output_matrix = np.ndarray(shape=(1, output_matrix_width_height, output_matrix_width_height, 
-                                      input_matrix_depth), dtype=np.float32)
+    #output_matrix = np.ndarray(shape=(1, output_matrix_width_height, output_matrix_width_height, 
+    #                                  input_matrix_depth), dtype=np.float32)
 
-    for i in range(0, input_matrix_width_height):
-        for j in range(0, input_matrix_width_height):
-            for k in range(0, input_matrix_depth):
-                output_matrix[0][i*2][j*2][k] = input_matrix[0][i][j][k]
-                output_matrix[0][(i*2)+1][j*2][k] = input_matrix[0][i][j][k]
-                output_matrix[0][i*2][(j*2)+1][k] = input_matrix[0][i][j][k]
-                output_matrix[0][(i*2)+1][(j+2)+1][k] = input_matrix[0][i][j][k]
+    #for i in range(0, input_matrix_width_height):
+    #    for j in range(0, input_matrix_width_height):
+    #        for k in range(0, input_matrix_depth):
+    #            output_matrix[0][i*2][j*2][k] = input_matrix[0][i][j][k]
+    #            output_matrix[0][(i*2)+1][j*2][k] = input_matrix[0][i][j][k]
+    #            output_matrix[0][i*2][(j*2)+1][k] = input_matrix[0][i][j][k]
+    #            output_matrix[0][(i*2)+1][(j+2)+1][k] = input_matrix[0][i][j][k]
+    output_matrix = np.repeat(np.repeat(input_matrix, kernel_size, axis=1), kernel_size, axis=2)
     return output_matrix
 
 def reshape(input_matrix, reshape_dims):
@@ -187,3 +166,30 @@ def zero_pad_matrix(input_matrix, num_zeros):
     num_zeros = int(num_zeros)
     return np.pad(input_matrix, ((0, 0), (num_zeros, num_zeros),
                                  (num_zeros, num_zeros), (0, 0)), 'constant')
+
+def predict_with_keras_model(keras_model, event):
+    prediction = event
+    for layer in keras_model.layers:
+
+        #get layer information via keras
+        layer_type = get_layer_type(layer)
+        layer_config = layer.get_config()
+
+        #perform appropriate operation
+        if layer_type == 'convolution2d':
+            prediction = convolution_2d(prediction, layer.get_weights(), 1, padding='same')
+            if layer_config['activation'] == 'relu':
+                prediction = relu(prediction)
+            if layer_config['activation'] == 'sigmoid':
+                prediction = sigmoid(prediction)
+        if layer_type == 'maxpooling2d':
+            prediction = max_pool_2d(prediction, layer_config['pool_size'][0], layer_config['strides'][0], padding='valid')
+        if layer_type == 'reshape':
+            prediction = reshape(prediction, layer_config['target_shape'])
+        if layer_type == 'upsampling2d':
+            #prediction = keras_get_layer_output(keras_model, layer, event)
+            #prediction = predict_with_keras(keras_model, i, prediction)
+            #temporarily use keras for this
+            prediction = upsampling_2d(prediction, layer_config['size'][0])
+    return prediction
+
