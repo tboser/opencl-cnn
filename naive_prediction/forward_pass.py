@@ -49,6 +49,7 @@ def convolution_2d(input_matrix, filter_weights, stride, padding='same'):
     output_matrix_width_height = padded_matrix_dim - filter_dim + 1
     output_matrix = np.ndarray(shape=(1, output_matrix_width_height,
                                       output_matrix_width_height, num_filters), dtype=np.float32)
+    output_matrix.fill(0)
 
     for j in range(0, padded_matrix_dim - filter_dim + 1, stride): #height
         for i in range(0, padded_matrix_dim - filter_dim + 1, stride): #width
@@ -156,7 +157,7 @@ def reshape(input_matrix, reshape_dims):
     """
     Reshape input hopefully the same way Keras does it.
     """
-    return np.reshape(input_matrix, (1,) + reshape_dims)
+    return np.reshape(input_matrix, (-1,) + reshape_dims)
 
 def zero_pad_matrix(input_matrix, num_zeros):
     """
