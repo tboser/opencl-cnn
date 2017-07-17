@@ -5,7 +5,7 @@ Modules will initially be written in standard python and then have parts pushed 
 """
 from __future__ import print_function, division
 from data_utils import get_layer_type
-from tests import predict_with_keras, keras_get_layer_output
+#from tests import predict_with_keras, keras_get_layer_output
 
 import numpy as np
 import pyopencl as cl
