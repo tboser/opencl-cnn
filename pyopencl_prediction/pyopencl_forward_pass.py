@@ -2,9 +2,252 @@ from __future__ import print_function, division
 from naive_prediction.data_utils import get_layer_type
 #from tests import predict_with_keras, keras_get_layer_output
 
+#Parallelize prediction of multiple events.
+#from joblib import Parallel, delayed
+
 import numpy as np
 import pyopencl as cl
+import time
 
+class Predictor:
+
+    def __init__(self, model, cl_idx=0):
+        """
+        Initialize and store everything necessary to make a prediction.
+        """
+        self.model = model
+        self.layers = []
+        self.init_cl(cl_idx)
+        self.init_layers()
+
+    def _predict(self, event):
+        prediction = cl.array.to_device(self.queue, np.reshape(event, event.shape + (1,)), allocator=self.mem_pool)
+        for layer in self.layers:
+            prediction = layer.predict(prediction)
+        return prediction
+
+    def predict(self, examples, num_jobs=1):
+        """
+        Make a prediction on examples using the stored model
+        """
+        #return Parallel(n_jobs=int(num_jobs)) (delayed(_predict) (event, self.layers) for event in examples)
+        return [self._predict(event) for event in examples]
+
+    def update_model(self, model):
+        pass
+
+    def init_layers(self):
+        """
+        Initialize layers construct to increase prediction efficiency
+        """
+        for layer in self.model.layers:
+            layer_type = get_layer_type(layer)
+            layer_config = layer.get_config()
+            if layer_type == 'convolution2d':
+                self.layers.append(Conv2d(layer, self.prg, self.queue, self.mem_pool))
+            if layer_type == 'maxpooling2d':
+                self.layers.append(Pool2d(layer, self.prg, self.queue, self.mem_pool))
+            if layer_type == 'reshape':
+                self.layers.append(Reshape(layer, self.prg, self.queue, self.mem_pool))
+            if layer_type == 'upsampling2d':
+                self.layers.append(Upsample2d(layer, self.prg, self.queue, self.mem_pool))
+
+
+    def init_cl(self, cl_idx):
+        """
+        Initialize pyopencl stuff**
+        """
+        self.platforms = cl.get_platforms()
+        self.devices = self.platforms[0].get_devices()
+        self.ctx = cl.Context([self.devices[cl_idx]])
+        self.queue = cl.CommandQueue(self.ctx)
+        self.prg = cl.Program(self.ctx, conv2d_kernel + conv2d_relu_kernel + conv2d_sigmoid_kernel + max_pool_kernel).build()
+        self.mem_pool = cl.tools.MemoryPool(cl.tools.ImmediateAllocator(self.queue))
+
+
+#### Layer classes
+class Conv2d:
+
+    def __init__(self, keras_layer, prg, queue, mem_pool):
+        self.layer = keras_layer
+        self.prg = prg
+        self.queue = queue
+        self.stride = 1
+        self.activation = self.layer.get_config()['activation']
+        self.padding = 'same'
+        self.mem_pool = mem_pool
+        self.initialize_weights()
+        self.pick_kernel()
+
+        self.filter_dim = len(self.weights_matrix)
+        self.num_filters = len(self.weights_matrix.T)
+
+    def predict(self, input_matrix):
+        start = time.time()
+        input_matrix = input_matrix.get()
+        if self.padding == 'same':
+            num_zeros_padding = (self.filter_dim - 1) / 2
+            padded_matrix = self.zero_pad_matrix(input_matrix, num_zeros_padding)
+        else:
+            padded_matrix = input_matrix
+            
+        padded_matrix_dim = len(padded_matrix[0][0])
+
+        try:
+            num_input_channels = len(input_matrix[0][0][0])
+        except:
+            num_input_channels = 1
+        output_matrix_width_height = padded_matrix_dim - self.filter_dim + 1
+        end = time.time()
+        print("Conv time for preprocess", end-start)
+        
+        start = time.time()
+        a = cl.array.to_device(self.queue, padded_matrix, allocator=self.mem_pool)
+        c = cl.array.zeros(self.queue, shape=(1, output_matrix_width_height,
+                                         output_matrix_width_height, self.num_filters),
+                          dtype=np.float32, allocator=self.mem_pool)
+        end = time.time()
+        print("Conv time of cl array stuff", end-start)
+        
+        start = time.time()
+        if self.activation=='relu':
+            self.prg.convolute_2d_relu(self.queue, (output_matrix_width_height, 
+                                 output_matrix_width_height,
+                                 self.num_filters,), None, c.data, a.data, self.weights_matrix.data, self.bias_vector.data, np.int32(self.filter_dim),
+                        np.int32(output_matrix_width_height), np.int32(self.num_filters), np.int32(num_input_channels),
+                        np.int32(padded_matrix_dim))
+        elif self.activation=='sigmoid':
+            self.prg.convolute_2d_sigmoidal(self.queue, (output_matrix_width_height, 
+                                 output_matrix_width_height,
+                                 self.num_filters,), None, c.data, a.data, self.weights_matrix.data, self.bias_vector.data, np.int32(self.filter_dim),
+                        np.int32(output_matrix_width_height), np.int32(self.num_filters), np.int32(num_input_channels),
+                        np.int32(padded_matrix_dim))
+        else:
+            self.prg.convolute_2d(self.queue, (output_matrix_width_height, 
+                                 output_matrix_width_height,
+                                 self.num_filters,), None, c.data, a.data, self.weights_matrix.data, self.bias_vector.data, np.int32(self.filter_dim),
+                        np.int32(output_matrix_width_height), np.int32(self.num_filters), np.int32(num_input_channels),
+                        np.int32(padded_matrix_dim))
+        end = time.time()
+        print("Conv time of conv operation", end-start)
+        
+        return c
+
+    def initialize_weights(self):
+        keras_weights = self.layer.get_weights()
+        weight_matrix = keras_weights[0]
+        bias_vector = keras_weights[1]
+        self.weights_matrix = cl.array.to_device(self.queue, weight_matrix, allocator=self.mem_pool)
+        self.bias_vector = cl.array.to_device(self.queue, bias_vector, allocator=self.mem_pool)
+
+    def pick_kernel(self):
+        if self.activation == 'relu':
+            self.convolution_2d = self.prg.convolute_2d_relu
+        elif self.activation == 'sigmoid':
+            self.convolution_2d = self.prg.convolute_2d_sigmoidal
+        else:
+            self.convolution_2d = self.prg.convolute_2d
+
+    def zero_pad_matrix(self, input_matrix, num_zeros):
+        """
+        Pad the 3d (nxmxz) input matrix with p zeros
+        Assumes 'reshaped' matrix. Need to look at this more closely.
+        """
+        num_zeros = int(num_zeros)
+        return np.pad(input_matrix, ((0, 0), (num_zeros, num_zeros),
+                                     (num_zeros, num_zeros), (0, 0)), 'constant')
+
+
+class Pool2d:
+
+    def __init__(self, keras_layer, prg, queue, mem_pool):
+        self.layer = keras_layer
+        self.prg = prg
+        self.queue = queue
+        self.mem_pool = mem_pool
+        self.stride = self.layer.get_config()['strides'][0]
+        self.kernel_size = self.layer.get_config()['pool_size'][0]
+        self.maxpooling_2d = prg.max_pool_2d
+
+    def predict(self, input_matrix):
+        start = time.time()
+        input_matrix_width_height = len(input_matrix[0])
+        input_matrix_depth = len(input_matrix[0][0][0])
+        output_matrix_width_height = int(((input_matrix_width_height - self.kernel_size) / self.stride) + 1)
+        end = time.time()
+        print("Pooling time to preprocess", end-start)
+
+        start = time.time()
+        c = cl.array.zeros(self.queue, shape=(1, output_matrix_width_height,
+                                         output_matrix_width_height, input_matrix_depth),
+                          dtype=np.float32, allocator=self.mem_pool)
+        end = time.time()
+        print("Pooling time to create zeros array", end-start)
+        
+        start = time.time()
+        self.prg.max_pool_2d(self.queue, (output_matrix_width_height, 
+                             output_matrix_width_height,
+                             input_matrix_depth,), None, c.data, input_matrix.data, np.int32(self.kernel_size),
+                    np.int32(self.stride), np.int32(output_matrix_width_height), np.int32(input_matrix_depth),
+                    np.int32(input_matrix_width_height))
+        end = time.time()
+        print("Pooling time for actual operation", end-start)
+        
+        return c
+
+class Reshape:
+
+    def __init__(self, keras_layer, prg, queue, mem_pool):
+        self.layer = keras_layer
+        self.target_shape = self.layer.get_config()['target_shape']
+        self.prg = prg
+        self.queue = queue
+
+        self.mem_pool = mem_pool
+
+    def predict(self, input_matrix):
+        """
+        Reshape matrix
+        """
+        return input_matrix.reshape((1,) + self.target_shape)
+
+class Upsample2d:
+
+    def __init__(self, keras_layer, prg, queue, mem_pool):
+        """
+        """
+        self.layer = keras_layer
+        self.kernel_size = self.layer.get_config()['size'][0]
+        self.prg = prg
+        self.queue = queue
+
+        self.mem_pool = mem_pool
+
+    def predict(self, input_matrix):
+        output_matrix = np.repeat(np.repeat(input_matrix.get(), self.kernel_size, axis=1), self.kernel_size, axis=2)
+        return cl.array.to_device(self.queue, output_matrix, allocator=self.mem_pool)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+########################################
+#### Standalone methods for testing ####
+########################################
 def predict(model, test_events, prg, queue):
     """ make full prediction given test_events """
     all_predictions = []
@@ -35,7 +278,7 @@ def convolution_2d(input_matrix, filter_weights, stride, prg, queue, activation=
 
     #print(input_matrix)
     #print(input_matrix.shape)
-    print(input_matrix.shape)
+    #print(input_matrix.shape)
     weights_matrix = filter_weights[0]
     bias_vector = filter_weights[1]
 
@@ -110,7 +353,7 @@ def upsampling_2d(input_matrix, kernel_size):
     return output_matrix
 
 def reshape(inputs, target_shape):
-    print(inputs.shape)
+    #print(inputs.shape)
     return np.reshape(inputs, (1,) + target_shape)
 
 def zero_pad_matrix(input_matrix, num_zeros):
