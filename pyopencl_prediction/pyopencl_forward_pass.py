@@ -1,13 +1,21 @@
 from __future__ import print_function, division
 from naive_prediction.data_utils import get_layer_type
 #from tests import predict_with_keras, keras_get_layer_output
-
+from keras import backend as K
 #Parallelize prediction of multiple events.
 #from joblib import Parallel, delayed
 
 import numpy as np
 import pyopencl as cl
 import time
+
+def predict_with_keras(model, layer_number, tinput):
+    """
+    To test other functions
+    """
+    get_layer_output = K.function([model.layers[layer_number-1].input],
+                                   [model.layers[layer_number].output])
+    return get_layer_output([tinput][0])
 
 class Predictor:
 
@@ -40,9 +48,11 @@ class Predictor:
         """
         Initialize layers construct to increase prediction efficiency
         """
+        lnum = 0
         for layer in self.model.layers:
             layer_type = get_layer_type(layer)
             layer_config = layer.get_config()
+            print(layer_type)
             if layer_type == 'convolution2d':
                 self.layers.append(Conv2d(layer, self.prg, self.queue, self.mem_pool))
             if layer_type == 'maxpooling2d':
@@ -51,7 +61,13 @@ class Predictor:
                 self.layers.append(Reshape(layer, self.prg, self.queue, self.mem_pool))
             if layer_type == 'upsampling2d':
                 self.layers.append(Upsample2d(layer, self.prg, self.queue, self.mem_pool))
-
+            if layer_type == 'dense':
+                self.layers.append(Dense(layer, self.prg, self.queue, self.mem_pool, lnum, self.model))
+            if layer_type == 'flatten':
+                self.layers.append(Flatten(layer, self.prg, self.queue, self.mem_pool, lnum, self.model))
+            if layer_type == 'dropout':
+                self.layers.append(Dropout(layer, self.prg, self.queue, self.mem_pool, lnum, self.model))
+            lnum += 1
 
     def init_cl(self, cl_idx):
         """
@@ -227,12 +243,64 @@ class Upsample2d:
         output_matrix = np.repeat(np.repeat(input_matrix.get(), self.kernel_size, axis=1), self.kernel_size, axis=2)
         return cl.array.to_device(self.queue, output_matrix, allocator=self.mem_pool)
 
+class Dropout:
+    """
+    Implementation of a dropout layer
+    """
 
+    def __init__(self, keras_layer, prg, queue, mem_pool, lnum, model):
+        """
+        """
+        self.layer = keras_layer
+        self.prg = prg
+        self.queue = queue
+        self.mem_pool = mem_pool
 
+        self.lnum = lnum
+        self.model = model
 
+    def predict(self, input_matrix):
+        """ tmp """
+        return cl.array.to_device(self.queue, predict_with_keras(self.model, self.lnum, input_matrix.get()), allocator=self.mem_pool)
 
+class Dense:
+    """
+    Fully connected layer
+    """
 
+    def __init__(self, keras_layer, prg, queue, mem_pool, lnum, model):
+        """
+        """
+        self.layer = keras_layer
+        self.prg = prg
+        self.queue = queue
+        self.mem_pool = mem_pool
 
+        self.lnum = lnum
+        self.model = model
+
+    def predict(self, input_matrix):
+        """ tmp """
+        return cl.array.to_device(self.queue, predict_with_keras(self.model, self.lnum, input_matrix.get()), allocator=self.mem_pool)
+
+class Flatten:
+    """
+    """
+
+    def __init__(self, keras_layer, prg, queue, mem_pool, lnum, model):
+        """
+        """
+        self.layer = keras_layer
+        self.prg = prg
+        self.queue = queue
+        self.mem_pool = mem_pool
+
+        self.lnum = lnum
+        self.model = model
+
+    def predict(self, input_matrix):
+        """ tmp """
+        return cl.array.to_device(self.queue, predict_with_keras(self.model, self.lnum, input_matrix.get()), allocator=self.mem_pool)
 
 
 
